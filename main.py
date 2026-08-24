@@ -1,70 +1,136 @@
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware # 1. Importe o middleware
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import urllib.request
 import urllib.error
+import urllib.request
 import json
 
 app = FastAPI()
 
-# 2. Defina as origens (frontends) que podem acessar sua API
-origens_permitidas = [
-    "*" # Exemplo para React/Vue local
-    # Adicione aqui o domínio do seu site em produção, ex: "https://meusite.com.br"
-    # Você pode usar ["*"] para liberar tudo, mas não é recomendado em produção.
-]
+origens_permitidas = ["*"]
 
-# 3. Adicione o middleware ao app
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origens_permitidas,
     allow_credentials=True,
-    allow_methods=["*"], # Libera todos os métodos (POST, GET, OPTIONS, etc)
-    allow_headers=["*"], # Libera todos os cabeçalhos
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+MELHORA_URL = "https://melhora.madesa.com:8090/api/avalsite/insert"
+MAX_FIELD_LENGTH = 2000
+POS_COMPRA_REQUIRED = (
+    "numero_pedido",
+    "nota",
+    "primeira_compra",
+    "como_conheceu",
+    "whatsapp",
+    "dispositivo",
 )
 
 
-# Atenção: Usamos "def" em vez de "async def" porque o urllib é síncrono
+def sanitize(value) -> str:
+    if value is None:
+        return ""
+    clean_value = str(value).strip()[:MAX_FIELD_LENGTH]
+    if clean_value and clean_value[0] in "=+-@":
+        return f"'{clean_value}"
+    return clean_value
+
+
+def format_registro_sao_paulo() -> str:
+    now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    return now.strftime("%d/%m/%Y - %H:%M")
+
+
+def build_melhora_payload(fields: dict) -> dict:
+    nota_raw = sanitize(fields.get("nota"))
+    try:
+        nota_numero = int(nota_raw) if nota_raw else None
+    except ValueError:
+        nota_numero = None
+
+    nota_motivo = sanitize(fields.get("nota_motivo")) or None
+
+    payload = {
+        "numero_pedido": sanitize(fields.get("numero_pedido")) or None,
+        "nota": nota_numero,
+        "nota_motivo": nota_motivo,
+        "comentario": nota_motivo,
+        "origem": sanitize(fields.get("como_conheceu")) or None,
+        "input_origem": sanitize(fields.get("input_origem")) or None,
+        "registro": format_registro_sao_paulo(),
+        "dispositivo": sanitize(fields.get("dispositivo")) or None,
+        "primeira_compra": sanitize(fields.get("primeira_compra")) or None,
+        "wpp_contact": sanitize(fields.get("whatsapp")) or None,
+    }
+
+    return {key: value for key, value in payload.items() if value is not None and value != ""}
+
+
 @app.post("/route-proxy")
 def route_proxy(payload: dict):
-    url_destino = "https://melhora.madesa.com:8090/api/avalsite/insert"
-    
-    # Prepara os dados convertendo o dicionário para string JSON e depois para bytes
-    corpo_requisicao = json.dumps(payload).encode('utf-8')
-    
-    # Monta a requisição
-    req = urllib.request.Request(url_destino, data=corpo_requisicao, method="POST")
-    req.add_header("Content-Type", "application/json")
-    
-    status_code = 500
-    response_text = ""
-    
-    try:
-        # Envia a requisição
-        with urllib.request.urlopen(req) as response:
-            status_code = response.getcode()
-            response_text = response.read().decode('utf-8')
-            
-    except urllib.error.HTTPError as e:
-        # O urllib levanta uma exceção se a resposta for 4xx ou 5xx
-        # Nós capturamos para pegar o status e o corpo do erro da mesma forma
-        status_code = e.code
-        response_text = e.read().decode('utf-8')
-        
-    except Exception as error:
-        print(f"Erro ao contatar o servidor: {error}")
+    origem = sanitize(payload.get("origem"))
+    if origem and origem != "pos-compra":
         return JSONResponse(
-            status_code=500, 
-            content={"message": "Erro interno ao tentar contatar o servidor de destino."}
+            status_code=400,
+            content={"error": "Este proxy só encaminha avaliações pós-compra."},
         )
 
-    # Tenta fazer o parse do JSON de resposta (exatamente como no seu código JS)
+    missing = []
+    for field in POS_COMPRA_REQUIRED:
+        if not sanitize(payload.get(field)):
+            missing.append(field)
+    if sanitize(payload.get("como_conheceu")) == "outro" and not sanitize(payload.get("input_origem")):
+        missing.append("input_origem")
+
+    if missing:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Campos obrigatórios para pós-compra ausentes: {', '.join(missing)}"},
+        )
+
+    melhora_payload = build_melhora_payload(payload)
+    corpo_requisicao = json.dumps(melhora_payload).encode("utf-8")
+
+    req = urllib.request.Request(MELHORA_URL, data=corpo_requisicao, method="POST")
+    req.add_header("Content-Type", "application/json")
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            status_code = response.getcode()
+            response_text = response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        status_code = error.code
+        response_text = error.read().decode("utf-8")
+        print(f"Falha no endpoint melhora: {status_code} {response_text}")
+        return JSONResponse(
+            status_code=502,
+            content={"error": "Erro ao salvar dados. Tente novamente."},
+        )
+    except Exception as error:
+        print(f"Falha ao enviar para endpoint melhora: {error}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Erro interno ao tentar contatar o servidor de destino."},
+        )
+
     try:
         data = json.loads(response_text) if response_text else {}
     except json.JSONDecodeError:
-        data = {
-            "message": "Resposta do servidor não é um JSON válido", 
-            "raw": response_text
-        }
+        data = {}
 
-    return JSONResponse(status_code=status_code, content=data)
+    if status_code >= 400 or data.get("success") is False or data.get("error"):
+        print(f"Falha no endpoint melhora: {status_code} {response_text}")
+        return JSONResponse(
+            status_code=502,
+            content={"error": "Erro ao salvar dados. Tente novamente."},
+        )
+
+    return JSONResponse(
+        status_code=200,
+        content={"success": True, "message": "Formulário enviado com sucesso!"},
+    )
