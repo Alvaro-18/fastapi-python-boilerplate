@@ -1,12 +1,12 @@
+import json
+import urllib.error
+import urllib.request
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-import urllib.error
-import urllib.request
-import json
 
 app = FastAPI()
 
@@ -69,6 +69,34 @@ def build_melhora_payload(fields: dict) -> dict:
     }
 
     return {key: value for key, value in payload.items() if value is not None and value != ""}
+
+
+
+@app.post("/debug-raw")
+async def log_raw_no_console(request: Request):
+    """
+    Captura e imprime exatamente o que foi enviado no corpo da requisição,
+    independentemente do formato (JSON, texto puro, form-data, etc.).
+    """
+    body_bytes = await request.body()
+    body_text = body_bytes.decode("utf-8", errors="replace")
+
+    print("\n" + "=" * 50)
+    print("📥 [DEBUG RAW] REQUISIÇÃO RECEBIDA EM /debug-raw")
+    print("-" * 50)
+    print("CORPO DA REQUISIÇÃO:")
+    print(body_text if body_text else "(Corpo vazio)")
+    print("=" * 50 + "\n")
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "sucesso",
+            "mensagem": "Corpo da requisição recebido e registrado no console.",
+            "tamanho_bytes": len(body_bytes),
+        },
+    )
+
 
 
 @app.post("/route-proxy")
