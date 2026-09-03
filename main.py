@@ -100,7 +100,7 @@ async def log_raw_no_console(request: Request):
 
 
 
-@app.post("/route-proxy-v2")
+@app.post("/route-proxy")
 def route_proxy(payload: dict):
     origem = sanitize(payload.get("origem"))
     if origem and origem != "pos-compra":
